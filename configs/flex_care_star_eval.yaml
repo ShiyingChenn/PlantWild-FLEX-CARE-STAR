@@ -1,0 +1,44 @@
+variant: flex_care
+
+data_root: /root/autodl-tmp/plantwild_gzsl/datasets/plantwild
+prompt_json: /root/autodl-tmp/plantwild_gzsl/prompts/plantwild_single_prompt.json
+model_name: ViT-B/16
+
+batch_size: 8
+num_workers: 4
+
+rank_hidden_dim: 256
+rank_dropout: 0.1
+evidence_hidden_dim: 512
+evidence_dropout: 0.1
+evidence_top_r: 16
+evidence_pool_tau: 0.5
+evidence_dev_weight: 0.3
+evidence_rank_weight: 0.7
+spatial_smooth_mu: 0.15
+max_evidence_weight: 0.10
+init_evidence_weight: 0.05
+
+care_class_penalty_weight: 0.75
+care_js_temp: 1.0
+care_reliability_beta_class: 1.0
+care_reliability_beta_js: 1.0
+
+disable_star: false
+star_risk_weight_reliability: 1.0
+star_risk_weight_uncertainty: 1.0
+star_risk_weight_seen_bias: 0.0
+star_dynamic_seen_suppression_kappa: 0.15
+star_triage_tau_accept: 1.1
+star_triage_tau_alert: 1.5
+
+expected_num_prompts: 1
+
+resume_ckpt: /root/autodl-tmp/plantwild_gzsl/outputs/results/flex_care_prob_gap_eta_0.75_bc_1.0_bj_1.0/best_h_flex_care.pt
+
+seed: 42
+device: cuda
+measure_eval_time: false
+save_per_sample_outputs: false
+
+output_dir: /root/autodl-tmp/plantwild_gzsl/outputs/results/flex_care_prob_gap_eta_0.75_bc_1.0_bj_1.0_star_v2_refine/rwrel_1.0_rwunc_1.0_rwsb_0.0_kappa_0.15_ta_1.1_tl_1.5
