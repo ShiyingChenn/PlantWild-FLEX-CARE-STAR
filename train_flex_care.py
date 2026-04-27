@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from sklearn.metrics import f1_score, roc_auc_score
 
+
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 CLIP_ROOT = None
@@ -44,8 +45,12 @@ from src.utils import set_seed, ensure_dir, save_json
 def parse_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--variant", type=str, default="flex_care",
-                        choices=["baseline", "flex", "flex_care"])
+    parser.add_argument(
+        "--variant",
+        type=str,
+        default="flex_care",
+        choices=["baseline", "flex", "flex_care"],
+    )
 
     parser.add_argument("--data_root", type=str, required=True)
     parser.add_argument("--prompt_json", type=str, required=True)
@@ -56,33 +61,109 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
 
+    # ===== FLEX =====
     parser.add_argument("--rank_hidden_dim", type=int, default=256)
     parser.add_argument("--rank_dropout", type=float, default=0.1)
-    parser.add_argument("--local_hidden_dim", "--evidence_hidden_dim", dest="evidence_hidden_dim", type=int, default=512)
-    parser.add_argument("--local_dropout", "--evidence_dropout", dest="evidence_dropout", type=float, default=0.1)
-    parser.add_argument("--local_top_r", "--evidence_top_r", dest="evidence_top_r", type=int, default=16)
-    parser.add_argument("--local_pool_tau", "--evidence_pool_tau", dest="evidence_pool_tau", type=float, default=0.5)
-    parser.add_argument("--glsim_weight", "--evidence_dev_weight", dest="evidence_dev_weight", type=float, default=0.3)
-    parser.add_argument("--rank_weight", "--evidence_rank_weight", dest="evidence_rank_weight", type=float, default=0.7)
+    parser.add_argument(
+        "--local_hidden_dim",
+        "--evidence_hidden_dim",
+        dest="evidence_hidden_dim",
+        type=int,
+        default=512,
+    )
+    parser.add_argument(
+        "--local_dropout",
+        "--evidence_dropout",
+        dest="evidence_dropout",
+        type=float,
+        default=0.1,
+    )
+    parser.add_argument(
+        "--local_top_r",
+        "--evidence_top_r",
+        dest="evidence_top_r",
+        type=int,
+        default=16,
+    )
+    parser.add_argument(
+        "--local_pool_tau",
+        "--evidence_pool_tau",
+        dest="evidence_pool_tau",
+        type=float,
+        default=0.5,
+    )
+    parser.add_argument(
+        "--glsim_weight",
+        "--evidence_dev_weight",
+        dest="evidence_dev_weight",
+        type=float,
+        default=0.3,
+    )
+    parser.add_argument(
+        "--rank_weight",
+        "--evidence_rank_weight",
+        dest="evidence_rank_weight",
+        type=float,
+        default=0.7,
+    )
     parser.add_argument("--spatial_smooth_mu", type=float, default=0.15)
-    parser.add_argument("--max_local_weight", "--max_evidence_weight", dest="max_evidence_weight", type=float, default=0.10)
-    parser.add_argument("--local_init_weight", "--init_evidence_weight", dest="init_evidence_weight", type=float, default=0.05)
+    parser.add_argument(
+        "--max_local_weight",
+        "--max_evidence_weight",
+        dest="max_evidence_weight",
+        type=float,
+        default=0.10,
+    )
+    parser.add_argument(
+        "--local_init_weight",
+        "--init_evidence_weight",
+        dest="init_evidence_weight",
+        type=float,
+        default=0.05,
+    )
 
-    parser.add_argument("--align_eta", "--care_class_penalty_weight", dest="care_class_penalty_weight", type=float, default=0.05)
+    # ===== CARE =====
+    # Paper/main setting: prob_gap.
+    # Keep care_mode explicit for reproducibility instead of hard-coding it.
+    parser.add_argument(
+        "--care_mode",
+        type=str,
+        default="prob_gap",
+        choices=["original", "prob_gap", "logit_temp_scaled", "logit_mean_norm"],
+    )
+    parser.add_argument(
+        "--align_eta",
+        "--care_class_penalty_weight",
+        dest="care_class_penalty_weight",
+        type=float,
+        default=0.05,
+    )
     parser.add_argument("--care_js_temp", type=float, default=1.0)
     parser.add_argument("--care_reliability_beta_class", type=float, default=1.0)
     parser.add_argument("--care_reliability_beta_js", type=float, default=1.0)
-    parser.add_argument("--train_with_calibrated_logits", action="store_true",
-                        help="if set, train with CARE-calibrated logits; otherwise train with fused logits")
+    parser.add_argument("--care_disagreement_temp", type=float, default=10.0)
+    parser.add_argument(
+        "--train_with_calibrated_logits",
+        action="store_true",
+        help="if set, train with CARE-calibrated logits; otherwise train with fused logits",
+    )
 
+    # ===== prompt =====
     parser.add_argument("--expected_num_prompts", type=int, default=1)
 
+    # ===== misc =====
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--eval_every", type=int, default=1)
     parser.add_argument("--output_dir", type=str, default="./outputs/results/flex_care")
 
+    # ===== logging =====
     parser.add_argument("--measure_eval_time", action="store_true")
+    parser.add_argument(
+        "--save_aux_stats",
+        action="store_true",
+        help="kept for command compatibility; scalar aux stats are already saved in eval_stats",
+    )
 
     return parser.parse_args()
 
@@ -158,7 +239,10 @@ def evaluate_split(split_name, logits, labels):
         "top1": round(topk_accuracy(logits, labels, k=1), 2),
         "top3": round(topk_accuracy(logits, labels, k=3), 2),
         "top5": round(topk_accuracy(logits, labels, k=5), 2),
-        "macro_f1": round(float(f1_score(y_true, y_pred, average="macro", zero_division=0) * 100.0), 2),
+        "macro_f1": round(
+            float(f1_score(y_true, y_pred, average="macro", zero_division=0) * 100.0),
+            2,
+        ),
         "macro_auc": round(macro_auc_ovr_safe(y_true, probs, num_classes=num_classes), 2),
     }
     return result
@@ -175,7 +259,14 @@ def extract_scalar_aux(aux):
 
 
 @torch.no_grad()
-def collect_logits_for_loader(clip_model, model, loader, text_bank, device, measure_eval_time=False):
+def collect_logits_for_loader(
+    clip_model,
+    model,
+    loader,
+    text_bank,
+    device,
+    measure_eval_time=False,
+):
     clip_model.eval()
     model.eval()
 
@@ -200,7 +291,7 @@ def collect_logits_for_loader(clip_model, model, loader, text_bank, device, meas
         end_t = time.perf_counter()
 
         if measure_eval_time:
-            total_time += (end_t - start_t)
+            total_time += end_t - start_t
             total_images += batch_size
 
         scalar_aux = extract_scalar_aux(aux)
@@ -218,7 +309,12 @@ def collect_logits_for_loader(clip_model, model, loader, text_bank, device, meas
     if total_samples > 0:
         stats = {k: round(v / total_samples, 6) for k, v in scalar_stat_sum.items()}
 
-    stats["avg_seconds_per_image"] = round(float(total_time / max(total_images, 1)), 6) if measure_eval_time else None
+    stats["avg_seconds_per_image"] = (
+        round(float(total_time / max(total_images, 1)), 6)
+        if measure_eval_time
+        else None
+    )
+
     if measure_eval_time and device == "cuda" and torch.cuda.is_available():
         peak_memory_mb = torch.cuda.max_memory_allocated() / (1024 ** 2)
         stats["peak_memory_mb"] = round(float(peak_memory_mb), 2)
@@ -236,7 +332,7 @@ def run_full_evaluation(
     new_test_loader,
     text_bank,
     device,
-    measure_eval_time=False
+    measure_eval_time=False,
 ):
     base_logits, base_labels, base_stats = collect_logits_for_loader(
         clip_model=clip_model,
@@ -244,7 +340,7 @@ def run_full_evaluation(
         loader=base_test_loader,
         text_bank=text_bank,
         device=device,
-        measure_eval_time=measure_eval_time
+        measure_eval_time=measure_eval_time,
     )
 
     new_logits, new_labels, new_stats = collect_logits_for_loader(
@@ -253,7 +349,7 @@ def run_full_evaluation(
         loader=new_test_loader,
         text_bank=text_bank,
         device=device,
-        measure_eval_time=measure_eval_time
+        measure_eval_time=measure_eval_time,
     )
 
     seen_result = evaluate_split("seen(base_test)", base_logits, base_labels)
@@ -262,7 +358,7 @@ def run_full_evaluation(
 
     eval_stats = {
         "base_eval": base_stats,
-        "new_eval": new_stats
+        "new_eval": new_stats,
     }
     return seen_result, unseen_result, h_score, eval_stats
 
@@ -273,9 +369,11 @@ def format_epoch_result(epoch, epochs, train_loss, seen_result, unseen_result, h
         f"TrainLoss={train_loss:.4f} | "
         f"EvidenceW={evidence_weight:.4f} | "
         f"Seen: Top1={seen_result['top1']:.2f} Top3={seen_result['top3']:.2f} "
-        f"Top5={seen_result['top5']:.2f} F1={seen_result['macro_f1']:.2f} AUC={seen_result['macro_auc']:.2f} | "
+        f"Top5={seen_result['top5']:.2f} F1={seen_result['macro_f1']:.2f} "
+        f"AUC={seen_result['macro_auc']:.2f} | "
         f"Unseen: Top1={unseen_result['top1']:.2f} Top3={unseen_result['top3']:.2f} "
-        f"Top5={unseen_result['top5']:.2f} F1={unseen_result['macro_f1']:.2f} AUC={unseen_result['macro_auc']:.2f} | "
+        f"Top5={unseen_result['top5']:.2f} F1={unseen_result['macro_f1']:.2f} "
+        f"AUC={unseen_result['macro_auc']:.2f} | "
         f"H={h_score:.2f}"
     )
     return msg
@@ -292,7 +390,7 @@ def run_eval_only(
     unseen_classes,
     all_classes,
     output_dir,
-    device
+    device,
 ):
     seen_result, unseen_result, h_score, eval_stats = run_full_evaluation(
         clip_model=clip_model,
@@ -301,7 +399,7 @@ def run_eval_only(
         new_test_loader=new_test_loader,
         text_bank=all_text_bank,
         device=device,
-        measure_eval_time=args.measure_eval_time
+        measure_eval_time=args.measure_eval_time,
     )
 
     result = {
@@ -315,11 +413,12 @@ def run_eval_only(
             "seen": seen_result,
             "unseen": unseen_result,
             "h_score": h_score,
-            "eval_stats": eval_stats
+            "eval_stats": eval_stats,
         },
         "num_seen_classes": len(seen_classes),
         "num_unseen_classes": len(unseen_classes),
-        "num_all_classes": len(all_classes)
+        "num_all_classes": len(all_classes),
+        "args": vars(args),
     }
 
     save_json(result, os.path.join(output_dir, "final_result.json"))
@@ -336,6 +435,7 @@ def main():
 
     device = args.device if torch.cuda.is_available() and args.device == "cuda" else "cpu"
     print(f"Using device: {device}")
+    print(f"CARE mode: {args.care_mode}")
 
     print("Building class splits...")
     seen_classes, unseen_classes, all_classes = build_class_splits(args.data_root)
@@ -348,14 +448,14 @@ def main():
     seen_global_indices = torch.tensor(
         [class_to_global_idx[name] for name in seen_classes],
         dtype=torch.long,
-        device=device
+        device=device,
     )
 
     global_to_seen = torch.full(
         (len(all_classes),),
         fill_value=-1,
         dtype=torch.long,
-        device=device
+        device=device,
     )
     for local_idx, global_idx in enumerate(seen_global_indices.tolist()):
         global_to_seen[global_idx] = local_idx
@@ -373,17 +473,17 @@ def main():
     base_train_dataset = PlantWildDataset(
         root=os.path.join(args.data_root, "base_train"),
         all_classes=all_classes,
-        transform=preprocess
+        transform=preprocess,
     )
     base_test_dataset = PlantWildDataset(
         root=os.path.join(args.data_root, "base_test"),
         all_classes=all_classes,
-        transform=preprocess
+        transform=preprocess,
     )
     new_test_dataset = PlantWildDataset(
         root=os.path.join(args.data_root, "new_test"),
         all_classes=all_classes,
-        transform=preprocess
+        transform=preprocess,
     )
 
     train_loader = DataLoader(
@@ -392,21 +492,21 @@ def main():
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=(device == "cuda"),
-        drop_last=False
+        drop_last=False,
     )
     base_test_loader = DataLoader(
         base_test_dataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=(device == "cuda")
+        pin_memory=(device == "cuda"),
     )
     new_test_loader = DataLoader(
         new_test_dataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=(device == "cuda")
+        pin_memory=(device == "cuda"),
     )
 
     print("Loading prompt json...")
@@ -418,7 +518,7 @@ def main():
         prompt_dict=prompt_dict,
         classnames=all_classes,
         device=device,
-        expected_num_prompts=args.expected_num_prompts
+        expected_num_prompts=args.expected_num_prompts,
     ).float().to(device)
 
     if all_text_bank.shape[1] != 1:
@@ -433,7 +533,7 @@ def main():
 
     feat_dim = all_text_bank.shape[-1]
     print(f"Feature dim: {feat_dim}")
-    print(f"CARE align eta(class penalty): {args.care_class_penalty_weight}")
+    print(f"CARE class penalty: {args.care_class_penalty_weight}")
 
     model = FLEXCAREModel(
         feat_dim=feat_dim,
@@ -449,10 +549,12 @@ def main():
         spatial_smooth_mu=args.spatial_smooth_mu,
         max_evidence_weight=args.max_evidence_weight,
         init_evidence_weight=args.init_evidence_weight,
+        care_mode=args.care_mode,
         care_class_penalty_weight=args.care_class_penalty_weight,
         care_js_temp=args.care_js_temp,
         care_reliability_beta_class=args.care_reliability_beta_class,
-        care_reliability_beta_js=args.care_reliability_beta_js
+        care_reliability_beta_js=args.care_reliability_beta_js,
+        care_disagreement_temp=args.care_disagreement_temp,
     ).to(device)
 
     if args.variant == "baseline":
@@ -467,18 +569,18 @@ def main():
             unseen_classes=unseen_classes,
             all_classes=all_classes,
             output_dir=args.output_dir,
-            device=device
+            device=device,
         )
         return
 
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
         lr=args.lr,
-        weight_decay=args.weight_decay
+        weight_decay=args.weight_decay,
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        T_max=args.epochs
+        T_max=args.epochs,
     )
 
     history = []
@@ -502,16 +604,21 @@ def main():
             if (labels_local < 0).any():
                 bad_idx = torch.where(labels_local < 0)[0][:10].tolist()
                 raise RuntimeError(
-                    f"Found labels not in seen classes at training time. Example batch indices: {bad_idx}"
+                    f"Found labels not in seen classes at training time. "
+                    f"Example batch indices: {bad_idx}"
                 )
 
             with torch.no_grad():
-                global_features, patch_tokens = encode_images_with_patches(clip_model, images, device)
+                global_features, patch_tokens = encode_images_with_patches(
+                    clip_model,
+                    images,
+                    device,
+                )
 
             logits, aux = model(
                 global_feats=global_features,
                 patch_tokens=patch_tokens,
-                text_bank=seen_text_bank
+                text_bank=seen_text_bank,
             )
 
             if args.variant == "flex_care" and not args.train_with_calibrated_logits:
@@ -529,11 +636,13 @@ def main():
             running_loss += loss.item() * batch_size
             num_samples += batch_size
 
-            pbar.set_postfix({
-                "loss": f"{(running_loss / max(num_samples, 1)):.4f}",
-                "ew": f"{model.get_evidence_weight():.4f}",
-                "lr": f"{optimizer.param_groups[0]['lr']:.2e}"
-            })
+            pbar.set_postfix(
+                {
+                    "loss": f"{(running_loss / max(num_samples, 1)):.4f}",
+                    "ew": f"{model.get_evidence_weight():.4f}",
+                    "lr": f"{optimizer.param_groups[0]['lr']:.2e}",
+                }
+            )
 
         scheduler.step()
 
@@ -548,7 +657,7 @@ def main():
                 new_test_loader=new_test_loader,
                 text_bank=all_text_bank,
                 device=device,
-                measure_eval_time=args.measure_eval_time
+                measure_eval_time=args.measure_eval_time,
             )
 
             epoch_record = {
@@ -556,22 +665,25 @@ def main():
                 "lr": round(float(optimizer.param_groups[0]["lr"]), 8),
                 "train_loss": round(float(train_loss), 6),
                 "evidence_weight": round(float(evidence_weight), 6),
+                "care_mode": args.care_mode,
                 "seen": seen_result,
                 "unseen": unseen_result,
                 "h_score": h_score,
-                "eval_stats": eval_stats
+                "eval_stats": eval_stats,
             }
             history.append(epoch_record)
 
-            print(format_epoch_result(
-                epoch=epoch,
-                epochs=args.epochs,
-                train_loss=train_loss,
-                seen_result=seen_result,
-                unseen_result=unseen_result,
-                h_score=h_score,
-                evidence_weight=evidence_weight
-            ))
+            print(
+                format_epoch_result(
+                    epoch=epoch,
+                    epochs=args.epochs,
+                    train_loss=train_loss,
+                    seen_result=seen_result,
+                    unseen_result=unseen_result,
+                    h_score=h_score,
+                    evidence_weight=evidence_weight,
+                )
+            )
 
             save_json(history, os.path.join(args.output_dir, "history.json"))
 
@@ -581,12 +693,15 @@ def main():
                 best_result = epoch_record
 
                 ckpt_path = os.path.join(args.output_dir, f"best_h_{args.variant}.pt")
-                torch.save({
-                    "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
-                    "best_h": best_h,
-                    "args": vars(args)
-                }, ckpt_path)
+                torch.save(
+                    {
+                        "epoch": epoch,
+                        "model_state_dict": model.state_dict(),
+                        "best_h": best_h,
+                        "args": vars(args),
+                    },
+                    ckpt_path,
+                )
 
                 save_json(best_result, os.path.join(args.output_dir, "best_h_metrics.json"))
 
@@ -602,7 +717,8 @@ def main():
         "prompt_json": args.prompt_json,
         "expected_num_prompts": args.expected_num_prompts,
         "train_with_calibrated_logits": args.train_with_calibrated_logits,
-
+        "care_mode": args.care_mode,
+        "care_disagreement_temp": args.care_disagreement_temp,
         "rank_hidden_dim": args.rank_hidden_dim,
         "rank_dropout": args.rank_dropout,
         "evidence_hidden_dim": args.evidence_hidden_dim,
@@ -614,18 +730,16 @@ def main():
         "spatial_smooth_mu": args.spatial_smooth_mu,
         "max_evidence_weight": args.max_evidence_weight,
         "init_evidence_weight": args.init_evidence_weight,
-
         "care_class_penalty_weight": args.care_class_penalty_weight,
         "care_js_temp": args.care_js_temp,
         "care_reliability_beta_class": args.care_reliability_beta_class,
         "care_reliability_beta_js": args.care_reliability_beta_js,
-
         "num_seen_classes": len(seen_classes),
         "num_unseen_classes": len(unseen_classes),
         "num_all_classes": len(all_classes),
         "best_epoch": best_epoch,
         "best_result": best_result,
-        "args": vars(args)
+        "args": vars(args),
     }
 
     final_json = os.path.join(args.output_dir, "final_result.json")

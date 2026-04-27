@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from sklearn.metrics import f1_score, roc_auc_score
 
+
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 CLIP_ROOT = None
@@ -44,8 +45,12 @@ from src.utils import set_seed, ensure_dir, save_json
 def parse_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--variant", type=str, default="flex_care",
-                        choices=["baseline", "flex", "flex_care"])
+    parser.add_argument(
+        "--variant",
+        type=str,
+        default="flex_care",
+        choices=["baseline", "flex", "flex_care"],
+    )
 
     parser.add_argument("--data_root", type=str, required=True)
     parser.add_argument("--prompt_json", type=str, required=True)
@@ -53,25 +58,92 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--num_workers", type=int, default=4)
 
+    # ===== FLEX =====
     parser.add_argument("--rank_hidden_dim", type=int, default=256)
     parser.add_argument("--rank_dropout", type=float, default=0.1)
-    parser.add_argument("--local_hidden_dim", "--evidence_hidden_dim", dest="evidence_hidden_dim", type=int, default=512)
-    parser.add_argument("--local_dropout", "--evidence_dropout", dest="evidence_dropout", type=float, default=0.1)
-    parser.add_argument("--local_top_r", "--evidence_top_r", dest="evidence_top_r", type=int, default=16)
-    parser.add_argument("--local_pool_tau", "--evidence_pool_tau", dest="evidence_pool_tau", type=float, default=0.5)
-    parser.add_argument("--glsim_weight", "--evidence_dev_weight", dest="evidence_dev_weight", type=float, default=0.3)
-    parser.add_argument("--rank_weight", "--evidence_rank_weight", dest="evidence_rank_weight", type=float, default=0.7)
+    parser.add_argument(
+        "--local_hidden_dim",
+        "--evidence_hidden_dim",
+        dest="evidence_hidden_dim",
+        type=int,
+        default=512,
+    )
+    parser.add_argument(
+        "--local_dropout",
+        "--evidence_dropout",
+        dest="evidence_dropout",
+        type=float,
+        default=0.1,
+    )
+    parser.add_argument(
+        "--local_top_r",
+        "--evidence_top_r",
+        dest="evidence_top_r",
+        type=int,
+        default=16,
+    )
+    parser.add_argument(
+        "--local_pool_tau",
+        "--evidence_pool_tau",
+        dest="evidence_pool_tau",
+        type=float,
+        default=0.5,
+    )
+    parser.add_argument(
+        "--glsim_weight",
+        "--evidence_dev_weight",
+        dest="evidence_dev_weight",
+        type=float,
+        default=0.3,
+    )
+    parser.add_argument(
+        "--rank_weight",
+        "--evidence_rank_weight",
+        dest="evidence_rank_weight",
+        type=float,
+        default=0.7,
+    )
     parser.add_argument("--spatial_smooth_mu", type=float, default=0.15)
-    parser.add_argument("--max_local_weight", "--max_evidence_weight", dest="max_evidence_weight", type=float, default=0.10)
-    parser.add_argument("--local_init_weight", "--init_evidence_weight", dest="init_evidence_weight", type=float, default=0.05)
+    parser.add_argument(
+        "--max_local_weight",
+        "--max_evidence_weight",
+        dest="max_evidence_weight",
+        type=float,
+        default=0.10,
+    )
+    parser.add_argument(
+        "--local_init_weight",
+        "--init_evidence_weight",
+        dest="init_evidence_weight",
+        type=float,
+        default=0.05,
+    )
 
-    parser.add_argument("--align_eta", "--care_class_penalty_weight", dest="care_class_penalty_weight", type=float, default=0.05)
+    # ===== CARE =====
+    parser.add_argument(
+        "--care_mode",
+        type=str,
+        default="prob_gap",
+        choices=["original", "prob_gap", "logit_temp_scaled", "logit_mean_norm"],
+    )
+    parser.add_argument(
+        "--align_eta",
+        "--care_class_penalty_weight",
+        dest="care_class_penalty_weight",
+        type=float,
+        default=0.05,
+    )
     parser.add_argument("--care_js_temp", type=float, default=1.0)
     parser.add_argument("--care_reliability_beta_class", type=float, default=1.0)
     parser.add_argument("--care_reliability_beta_js", type=float, default=1.0)
+    parser.add_argument("--care_disagreement_temp", type=float, default=10.0)
 
-    parser.add_argument("--disable_star", action="store_true",
-                        help="if set, evaluate FLEX+CARE only; otherwise apply STAR")
+    # ===== STAR =====
+    parser.add_argument(
+        "--disable_star",
+        action="store_true",
+        help="if set, evaluate FLEX+CARE only; otherwise apply STAR",
+    )
     parser.add_argument("--star_risk_weight_reliability", type=float, default=1.0)
     parser.add_argument("--star_risk_weight_uncertainty", type=float, default=1.0)
     parser.add_argument("--star_risk_weight_seen_bias", type=float, default=1.0)
@@ -79,8 +151,10 @@ def parse_args():
     parser.add_argument("--star_triage_tau_accept", type=float, default=0.40)
     parser.add_argument("--star_triage_tau_alert", type=float, default=0.70)
 
+    # ===== prompt =====
     parser.add_argument("--expected_num_prompts", type=int, default=1)
 
+    # ===== checkpoint / eval =====
     parser.add_argument("--resume_ckpt", type=str, default="")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--seed", type=int, default=42)
@@ -162,7 +236,10 @@ def evaluate_split(split_name, logits, labels):
         "top1": round(topk_accuracy(logits, labels, k=1), 2),
         "top3": round(topk_accuracy(logits, labels, k=3), 2),
         "top5": round(topk_accuracy(logits, labels, k=5), 2),
-        "macro_f1": round(float(f1_score(y_true, y_pred, average="macro", zero_division=0) * 100.0), 2),
+        "macro_f1": round(
+            float(f1_score(y_true, y_pred, average="macro", zero_division=0) * 100.0),
+            2,
+        ),
         "macro_auc": round(macro_auc_ovr_safe(y_true, probs, num_classes=num_classes), 2),
     }
     return result
@@ -204,9 +281,9 @@ def selective_metrics(logits, labels, actions):
     pred = logits.argmax(dim=1)
     correct = pred.eq(labels)
 
-    accept_mask = (actions == 0)
-    defer_mask = (actions == 1)
-    alert_mask = (actions == 2)
+    accept_mask = actions == 0
+    defer_mask = actions == 1
+    alert_mask = actions == 2
 
     coverage = float(accept_mask.float().mean().item())
     defer_ratio = float(defer_mask.float().mean().item())
@@ -221,7 +298,7 @@ def selective_metrics(logits, labels, actions):
         "coverage_accept_ratio": round(coverage, 6),
         "defer_ratio": round(defer_ratio, 6),
         "alert_ratio": round(alert_ratio, 6),
-        "accept_subset_accuracy": round(accept_acc, 2) if accept_acc is not None else None
+        "accept_subset_accuracy": round(accept_acc, 2) if accept_acc is not None else None,
     }
 
 
@@ -243,6 +320,8 @@ def maybe_load_ckpt(model, ckpt_path, device):
         print(f"Checkpoint epoch: {ckpt['epoch']}")
     if "best_h" in ckpt:
         print(f"Checkpoint best_h: {ckpt['best_h']}")
+    if "args" in ckpt and isinstance(ckpt["args"], dict):
+        print(f"Checkpoint care_mode: {ckpt['args'].get('care_mode', 'unknown')}")
 
     return ckpt
 
@@ -256,7 +335,7 @@ def collect_outputs_for_loader(
     seen_mask,
     apply_star,
     args,
-    device
+    device,
 ):
     clip_model.eval()
     model.eval()
@@ -275,6 +354,11 @@ def collect_outputs_for_loader(
     care_js_div_sum = 0.0
     care_reliability_sum = 0.0
 
+    star_risk_sum = 0.0
+    star_accept_sum = 0.0
+    star_defer_sum = 0.0
+    star_alert_sum = 0.0
+
     total_samples = 0
 
     if args.measure_eval_time and device == "cuda" and torch.cuda.is_available():
@@ -285,14 +369,16 @@ def collect_outputs_for_loader(
         batch_size = labels.size(0)
 
         start_t = time.perf_counter()
+
         global_features, patch_tokens = encode_images_with_patches(clip_model, images, device)
         logits_before_star, aux = model(
             global_feats=global_features,
             patch_tokens=patch_tokens,
-            text_bank=text_bank
+            text_bank=text_bank,
         )
 
         reliability = aux["reliability"]
+
         if apply_star:
             final_logits, risk, actions, star_aux = apply_star_to_logits(
                 calibrated_logits=aux["calibrated_logits"],
@@ -303,8 +389,13 @@ def collect_outputs_for_loader(
                 risk_weight_seen_bias=args.star_risk_weight_seen_bias,
                 dynamic_seen_suppression_kappa=args.star_dynamic_seen_suppression_kappa,
                 triage_tau_accept=args.star_triage_tau_accept,
-                triage_tau_alert=args.star_triage_tau_alert
+                triage_tau_alert=args.star_triage_tau_alert,
             )
+
+            star_risk_sum += float(risk.mean().detach().cpu().item()) * batch_size
+            star_accept_sum += float((actions == 0).float().mean().detach().cpu().item()) * batch_size
+            star_defer_sum += float((actions == 1).float().mean().detach().cpu().item()) * batch_size
+            star_alert_sum += float((actions == 2).float().mean().detach().cpu().item()) * batch_size
         else:
             final_logits = logits_before_star
             risk = torch.zeros(batch_size, device=labels.device)
@@ -313,7 +404,7 @@ def collect_outputs_for_loader(
         end_t = time.perf_counter()
 
         if args.measure_eval_time:
-            total_time += (end_t - start_t)
+            total_time += end_t - start_t
             total_images += batch_size
 
         if "care_disagreement_top1_mean" in aux:
@@ -341,7 +432,11 @@ def collect_outputs_for_loader(
         "ece": round(expected_calibration_error(logits_final, labels), 6),
         "nll": round(nll_score(logits_final, labels), 6),
         "brier": round(multiclass_brier_score(logits_final, labels), 6),
-        "avg_seconds_per_image": round(float(total_time / max(total_images, 1)), 6) if args.measure_eval_time else None,
+        "avg_seconds_per_image": (
+            round(float(total_time / max(total_images, 1)), 6)
+            if args.measure_eval_time
+            else None
+        ),
         "care_disagreement_top1_mean": round(care_disagreement_top1_sum / max(total_samples, 1), 6),
         "care_js_div_mean": round(care_js_div_sum / max(total_samples, 1), 6),
         "care_reliability_mean": round(care_reliability_sum / max(total_samples, 1), 6),
@@ -354,14 +449,28 @@ def collect_outputs_for_loader(
         metrics["peak_memory_mb"] = None
 
     if apply_star:
+        metrics.update(
+            {
+                "star_risk_mean": round(star_risk_sum / max(total_samples, 1), 6),
+                "star_accept_ratio": round(star_accept_sum / max(total_samples, 1), 6),
+                "star_defer_ratio": round(star_defer_sum / max(total_samples, 1), 6),
+                "star_alert_ratio": round(star_alert_sum / max(total_samples, 1), 6),
+            }
+        )
         metrics.update(selective_metrics(logits_final, labels, actions))
     else:
-        metrics.update({
-            "coverage_accept_ratio": None,
-            "defer_ratio": None,
-            "alert_ratio": None,
-            "accept_subset_accuracy": None
-        })
+        metrics.update(
+            {
+                "star_risk_mean": None,
+                "star_accept_ratio": None,
+                "star_defer_ratio": None,
+                "star_alert_ratio": None,
+                "coverage_accept_ratio": None,
+                "defer_ratio": None,
+                "alert_ratio": None,
+                "accept_subset_accuracy": None,
+            }
+        )
 
     per_sample = {
         "labels": labels,
@@ -387,7 +496,7 @@ def run_full_evaluation(
     seen_mask,
     apply_star,
     args,
-    device
+    device,
 ):
     base_logits, base_labels, base_metrics, base_per_sample = collect_outputs_for_loader(
         clip_model=clip_model,
@@ -397,7 +506,7 @@ def run_full_evaluation(
         seen_mask=seen_mask,
         apply_star=apply_star,
         args=args,
-        device=device
+        device=device,
     )
 
     new_logits, new_labels, new_metrics, new_per_sample = collect_outputs_for_loader(
@@ -408,7 +517,7 @@ def run_full_evaluation(
         seen_mask=seen_mask,
         apply_star=apply_star,
         args=args,
-        device=device
+        device=device,
     )
 
     seen_result = evaluate_split("seen(base_test)", base_logits, base_labels)
@@ -417,7 +526,7 @@ def run_full_evaluation(
 
     per_sample = {
         "base_test": base_per_sample,
-        "new_test": new_per_sample
+        "new_test": new_per_sample,
     }
 
     return seen_result, unseen_result, h_score, base_metrics, new_metrics, per_sample
@@ -432,6 +541,7 @@ def main():
 
     device = args.device if torch.cuda.is_available() and args.device == "cuda" else "cpu"
     print(f"Using device: {device}")
+    print(f"CARE mode: {args.care_mode}")
     print(f"Apply STAR: {apply_star}")
 
     print("Building class splits...")
@@ -445,7 +555,7 @@ def main():
     seen_global_indices = torch.tensor(
         [class_to_global_idx[name] for name in seen_classes],
         dtype=torch.long,
-        device=device
+        device=device,
     )
     seen_mask = torch.zeros(len(all_classes), dtype=torch.bool, device=device)
     seen_mask[seen_global_indices] = True
@@ -463,12 +573,12 @@ def main():
     base_test_dataset = PlantWildDataset(
         root=os.path.join(args.data_root, "base_test"),
         all_classes=all_classes,
-        transform=preprocess
+        transform=preprocess,
     )
     new_test_dataset = PlantWildDataset(
         root=os.path.join(args.data_root, "new_test"),
         all_classes=all_classes,
-        transform=preprocess
+        transform=preprocess,
     )
 
     base_test_loader = DataLoader(
@@ -476,14 +586,14 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=(device == "cuda")
+        pin_memory=(device == "cuda"),
     )
     new_test_loader = DataLoader(
         new_test_dataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=(device == "cuda")
+        pin_memory=(device == "cuda"),
     )
 
     print("Loading prompt json...")
@@ -495,7 +605,7 @@ def main():
         prompt_dict=prompt_dict,
         classnames=all_classes,
         device=device,
-        expected_num_prompts=args.expected_num_prompts
+        expected_num_prompts=args.expected_num_prompts,
     ).float().to(device)
 
     if all_text_bank.shape[1] != 1:
@@ -525,10 +635,12 @@ def main():
         spatial_smooth_mu=args.spatial_smooth_mu,
         max_evidence_weight=args.max_evidence_weight,
         init_evidence_weight=args.init_evidence_weight,
+        care_mode=args.care_mode,
         care_class_penalty_weight=args.care_class_penalty_weight,
         care_js_temp=args.care_js_temp,
         care_reliability_beta_class=args.care_reliability_beta_class,
-        care_reliability_beta_js=args.care_reliability_beta_js
+        care_reliability_beta_js=args.care_reliability_beta_js,
+        care_disagreement_temp=args.care_disagreement_temp,
     ).to(device)
 
     if args.variant != "baseline":
@@ -545,7 +657,7 @@ def main():
         seen_mask=seen_mask,
         apply_star=apply_star,
         args=args,
-        device=device
+        device=device,
     )
 
     final_result = {
@@ -556,29 +668,27 @@ def main():
         "prompt_json": args.prompt_json,
         "expected_num_prompts": args.expected_num_prompts,
         "resume_ckpt": args.resume_ckpt,
-
+        "care_mode": args.care_mode,
+        "care_disagreement_temp": args.care_disagreement_temp,
         "care_class_penalty_weight": args.care_class_penalty_weight,
         "care_js_temp": args.care_js_temp,
         "care_reliability_beta_class": args.care_reliability_beta_class,
         "care_reliability_beta_js": args.care_reliability_beta_js,
-
         "star_risk_weight_reliability": args.star_risk_weight_reliability,
         "star_risk_weight_uncertainty": args.star_risk_weight_uncertainty,
         "star_risk_weight_seen_bias": args.star_risk_weight_seen_bias,
         "star_dynamic_seen_suppression_kappa": args.star_dynamic_seen_suppression_kappa,
         "star_triage_tau_accept": args.star_triage_tau_accept,
         "star_triage_tau_alert": args.star_triage_tau_alert,
-
         "num_seen_classes": len(seen_classes),
         "num_unseen_classes": len(unseen_classes),
         "num_all_classes": len(all_classes),
-
         "seen": seen_result,
         "unseen": unseen_result,
         "h_score": h_score,
         "base_eval_metrics": base_metrics,
         "new_eval_metrics": new_metrics,
-        "args": vars(args)
+        "args": vars(args),
     }
 
     final_json = os.path.join(args.output_dir, "eval_result.json")
