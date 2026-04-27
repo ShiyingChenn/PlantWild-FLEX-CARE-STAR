@@ -7,7 +7,9 @@ import torch.nn.functional as F
 
 class BoundedAddFusion(nn.Module):
     """
-    fused = normalize(global + w * evidence)
+    Fused feature:
+        fused = normalize(global + w * evidence)
+
     where:
         w = max_evidence_weight * sigmoid(raw_weight)
     """
@@ -43,6 +45,12 @@ class BoundedAddFusion(nn.Module):
 class FLEXFieldLesionEvidenceExtractor(nn.Module):
     """
     FLEX = Field Lesion Evidence Extractor
+
+    - global-guided deviation score
+    - learnable evidence ranking score
+    - spatial coherence smoothing
+    - top-r evidence selection
+    - soft evidence aggregation + lightweight refinement
     """
 
     def __init__(
@@ -57,7 +65,7 @@ class FLEXFieldLesionEvidenceExtractor(nn.Module):
         dev_weight=0.3,
         rank_weight=0.7,
         spatial_smooth_mu=0.15,
-        eps=1e-12
+        eps=1e-12,
     ):
         super().__init__()
         if top_r <= 0:
@@ -79,14 +87,14 @@ class FLEXFieldLesionEvidenceExtractor(nn.Module):
             nn.Linear(feat_dim * 2 + 1, rank_hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(rank_dropout),
-            nn.Linear(rank_hidden_dim, 1)
+            nn.Linear(rank_hidden_dim, 1),
         )
 
         self.evidence_adapter = nn.Sequential(
             nn.Linear(feat_dim, evidence_hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(evidence_dropout),
-            nn.Linear(evidence_hidden_dim, feat_dim)
+            nn.Linear(evidence_hidden_dim, feat_dim),
         )
 
     def _minmax_norm(self, x):
@@ -95,6 +103,10 @@ class FLEXFieldLesionEvidenceExtractor(nn.Module):
         return (x - x_min) / (x_max - x_min + self.eps)
 
     def _spatial_smooth(self, scores):
+        """
+        scores: [B, N]
+        If N is a square number, apply 3x3 average smoothing.
+        """
         if self.spatial_smooth_mu <= 0:
             return scores
 
@@ -162,14 +174,25 @@ class FLEXCAREModel(nn.Module):
         - flex
         - flex_care
 
-    CARE:
-        disagreement = |softmax(global / t) - softmax(evidence / t)|
+    CARE modes:
+        - original:
+            disagreement = abs(global_logits - evidence_logits)
+
+        - prob_gap:
+            disagreement = abs(softmax(global_logits / T) - softmax(evidence_logits / T))
+
+        - logit_temp_scaled:
+            disagreement = abs(global_logits - evidence_logits) / care_disagreement_temp
+
+        - logit_mean_norm:
+            disagreement = abs(global_logits - evidence_logits) / mean(abs(global_logits - evidence_logits))
     """
 
     def __init__(
         self,
         feat_dim,
         variant="flex_care",
+        # FLEX
         rank_hidden_dim=256,
         rank_dropout=0.1,
         evidence_hidden_dim=512,
@@ -181,25 +204,35 @@ class FLEXCAREModel(nn.Module):
         spatial_smooth_mu=0.15,
         max_evidence_weight=0.10,
         init_evidence_weight=0.05,
+        # CARE
+        care_mode="prob_gap",
         care_class_penalty_weight=0.05,
         care_js_temp=1.0,
         care_reliability_beta_class=1.0,
         care_reliability_beta_js=1.0,
-        eps=1e-12
+        care_disagreement_temp=10.0,
+        eps=1e-12,
     ):
         super().__init__()
+
         valid_variants = {"baseline", "flex", "flex_care"}
         if variant not in valid_variants:
             raise ValueError(f"variant must be one of {valid_variants}, got {variant}.")
+
+        valid_care_modes = {"original", "prob_gap", "logit_temp_scaled", "logit_mean_norm"}
+        if care_mode not in valid_care_modes:
+            raise ValueError(f"care_mode must be one of {valid_care_modes}, got {care_mode}.")
 
         self.variant = variant
         self.feat_dim = feat_dim
         self.eps = eps
 
+        self.care_mode = care_mode
         self.care_class_penalty_weight = float(care_class_penalty_weight)
         self.care_js_temp = float(care_js_temp)
         self.care_reliability_beta_class = float(care_reliability_beta_class)
         self.care_reliability_beta_js = float(care_reliability_beta_js)
+        self.care_disagreement_temp = float(care_disagreement_temp)
 
         if self.variant != "baseline":
             self.flex = FLEXFieldLesionEvidenceExtractor(
@@ -213,13 +246,13 @@ class FLEXCAREModel(nn.Module):
                 dev_weight=evidence_dev_weight,
                 rank_weight=evidence_rank_weight,
                 spatial_smooth_mu=spatial_smooth_mu,
-                eps=eps
+                eps=eps,
             )
 
             self.fusion = BoundedAddFusion(
                 feat_dim=feat_dim,
                 max_evidence_weight=max_evidence_weight,
-                init_evidence_weight=init_evidence_weight
+                init_evidence_weight=init_evidence_weight,
             )
         else:
             self.flex = None
@@ -248,22 +281,66 @@ class FLEXCAREModel(nn.Module):
         fused_logits = 100.0 * fused_feats @ text_bank.t()
         return global_logits, evidence_logits, fused_logits
 
-    def compute_care_outputs(self, global_logits, evidence_logits, fused_logits):
+    def _compute_probabilities(self, global_logits, evidence_logits):
         p_g = F.softmax(global_logits / self.care_js_temp, dim=1)
         p_e = F.softmax(evidence_logits / self.care_js_temp, dim=1)
+        return p_g, p_e
+
+    def _build_disagreement(self, global_logits, evidence_logits, p_g, p_e):
+        raw_logit_disagreement = torch.abs(global_logits - evidence_logits)
+        prob_disagreement = torch.abs(p_g - p_e)
+
+        if self.care_mode == "original":
+            disagreement = raw_logit_disagreement
+
+        elif self.care_mode == "prob_gap":
+            disagreement = prob_disagreement
+
+        elif self.care_mode == "logit_temp_scaled":
+            disagreement = raw_logit_disagreement / (self.care_disagreement_temp + self.eps)
+
+        elif self.care_mode == "logit_mean_norm":
+            disagreement = raw_logit_disagreement / (
+                raw_logit_disagreement.mean(dim=1, keepdim=True).detach() + self.eps
+            )
+
+        else:
+            raise RuntimeError(f"Unknown care_mode: {self.care_mode}")
+
+        return disagreement, raw_logit_disagreement, prob_disagreement
+
+    def compute_care_outputs(self, global_logits, evidence_logits, fused_logits):
+        p_g, p_e = self._compute_probabilities(global_logits, evidence_logits)
         js_div = self._js_div(p_g, p_e)
 
-        disagreement = torch.abs(p_g - p_e)
+        disagreement, raw_logit_disagreement, prob_disagreement = self._build_disagreement(
+            global_logits=global_logits,
+            evidence_logits=evidence_logits,
+            p_g=p_g,
+            p_e=p_e,
+        )
+
         calibrated_logits = fused_logits - self.care_class_penalty_weight * disagreement
 
         pred_idx = calibrated_logits.argmax(dim=1)
         d_top1 = disagreement.gather(1, pred_idx.unsqueeze(1)).squeeze(1)
 
         reliability = torch.exp(
-            -(self.care_reliability_beta_class * d_top1 + self.care_reliability_beta_js * js_div)
+            -(
+                self.care_reliability_beta_class * d_top1
+                + self.care_reliability_beta_js * js_div
+            )
         )
 
-        return calibrated_logits, disagreement, js_div, reliability, d_top1
+        diag = {
+            "raw_logit_disagreement": raw_logit_disagreement,
+            "prob_disagreement": prob_disagreement,
+            "d_top1": d_top1,
+            "p_g": p_g,
+            "p_e": p_e,
+        }
+
+        return calibrated_logits, disagreement, js_div, reliability, diag
 
     def forward(self, global_feats, patch_tokens, text_bank):
         global_feats = F.normalize(global_feats, dim=-1)
@@ -276,11 +353,14 @@ class FLEXCAREModel(nn.Module):
             logits = 100.0 * global_feats @ text_bank.t()
             aux = {
                 "variant": "baseline",
+                "care_mode": "none",
                 "fused_logits": logits,
                 "calibrated_logits": logits,
                 "global_logits": logits,
                 "evidence_logits": logits,
                 "disagreement": torch.zeros_like(logits),
+                "raw_logit_disagreement": torch.zeros_like(logits),
+                "prob_disagreement": torch.zeros_like(logits),
                 "js_div": torch.zeros(logits.shape[0], device=logits.device),
                 "reliability": torch.ones(logits.shape[0], device=logits.device),
                 "selected_top_r": 0,
@@ -297,26 +377,32 @@ class FLEXCAREModel(nn.Module):
             global_feats=global_feats,
             evidence_feats=evidence_feats,
             fused_feats=fused_feats,
-            text_bank=text_bank
+            text_bank=text_bank,
         )
 
         if self.variant == "flex":
             main_logits = fused_logits
             disagreement = torch.zeros_like(fused_logits)
+            raw_logit_disagreement = torch.zeros_like(fused_logits)
+            prob_disagreement = torch.zeros_like(fused_logits)
             js_div = torch.zeros(fused_logits.shape[0], device=fused_logits.device)
             reliability = torch.ones(fused_logits.shape[0], device=fused_logits.device)
             calibrated_logits = fused_logits
             d_top1 = torch.zeros(fused_logits.shape[0], device=fused_logits.device)
         else:
-            calibrated_logits, disagreement, js_div, reliability, d_top1 = self.compute_care_outputs(
+            calibrated_logits, disagreement, js_div, reliability, diag = self.compute_care_outputs(
                 global_logits=global_logits,
                 evidence_logits=evidence_logits,
-                fused_logits=fused_logits
+                fused_logits=fused_logits,
             )
+            raw_logit_disagreement = diag["raw_logit_disagreement"]
+            prob_disagreement = diag["prob_disagreement"]
+            d_top1 = diag["d_top1"]
             main_logits = calibrated_logits
 
         aux = {
             "variant": self.variant,
+            "care_mode": self.care_mode,
             "global_feats": global_feats,
             "evidence_feats": evidence_feats,
             "fused_feats": fused_feats,
@@ -325,6 +411,8 @@ class FLEXCAREModel(nn.Module):
             "fused_logits": fused_logits,
             "calibrated_logits": calibrated_logits,
             "disagreement": disagreement,
+            "raw_logit_disagreement": raw_logit_disagreement,
+            "prob_disagreement": prob_disagreement,
             "js_div": js_div,
             "reliability": reliability,
             "evidence_weight": self.fusion.get_weight().detach(),
@@ -334,8 +422,15 @@ class FLEXCAREModel(nn.Module):
 
         if self.variant == "flex_care":
             pred_idx = calibrated_logits.argmax(dim=1, keepdim=True)
+
             aux["care_disagreement_top1_mean"] = float(
                 disagreement.gather(1, pred_idx).mean().detach().cpu().item()
+            )
+            aux["care_raw_logit_disagreement_top1_mean"] = float(
+                raw_logit_disagreement.gather(1, pred_idx).mean().detach().cpu().item()
+            )
+            aux["care_prob_disagreement_top1_mean"] = float(
+                prob_disagreement.gather(1, pred_idx).mean().detach().cpu().item()
             )
             aux["care_d_top1_mean"] = float(d_top1.mean().detach().cpu().item())
             aux["care_js_div_mean"] = float(js_div.mean().detach().cpu().item())
@@ -351,14 +446,19 @@ def apply_star_to_logits(
     seen_mask,
     risk_weight_reliability=1.0,
     risk_weight_uncertainty=1.0,
-    risk_weight_seen_bias=0.25,
-    dynamic_seen_suppression_kappa=0.25,
-    triage_tau_accept=1.10,
-    triage_tau_alert=1.50,
-    eps=1e-12
+    risk_weight_seen_bias=1.0,
+    dynamic_seen_suppression_kappa=1.0,
+    triage_tau_accept=0.40,
+    triage_tau_alert=0.70,
+    eps=1e-12,
 ):
     """
-    actions: 0=accept, 1=defer, 2=alert
+    STAR: risk-aware seen-class temperature suppression.
+
+    actions:
+        0 = accept
+        1 = defer
+        2 = alert
     """
     if triage_tau_accept >= triage_tau_alert:
         raise ValueError("triage_tau_accept must be smaller than triage_tau_alert.")
@@ -385,19 +485,20 @@ def apply_star_to_logits(
     seen_bias = F.relu(max_seen_prob - max_unseen_prob)
 
     risk = (
-        risk_weight_reliability * (1.0 - reliability) +
-        risk_weight_uncertainty * norm_entropy +
-        risk_weight_seen_bias * seen_bias
+        risk_weight_reliability * (1.0 - reliability)
+        + risk_weight_uncertainty * norm_entropy
+        + risk_weight_seen_bias * seen_bias
     )
 
     gate = torch.clamp(
         (risk - triage_tau_accept) / (triage_tau_alert - triage_tau_accept + eps),
         min=0.0,
-        max=1.0
+        max=1.0,
     )
 
     pred0 = calibrated_logits.argmax(dim=1)
     pred_is_seen = seen_mask[pred0].float()
+
     effective_gate = gate * pred_is_seen
 
     dynamic_ts = 1.0 + dynamic_seen_suppression_kappa * effective_gate
@@ -418,6 +519,9 @@ def apply_star_to_logits(
         "star_gate_mean": float(gate.mean().detach().cpu().item()),
         "star_effective_gate_mean": float(effective_gate.mean().detach().cpu().item()),
         "star_dynamic_ts_mean": float(dynamic_ts.mean().detach().cpu().item()),
+        "star_accept_ratio": float((actions == 0).float().mean().detach().cpu().item()),
+        "star_defer_ratio": float((actions == 1).float().mean().detach().cpu().item()),
+        "star_alert_ratio": float((actions == 2).float().mean().detach().cpu().item()),
     }
 
     return final_logits, risk, actions, aux
